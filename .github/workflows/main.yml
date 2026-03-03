@@ -1,0 +1,59 @@
+name: Sync Releases from Upstream
+
+on:
+  schedule:
+    # 每天 UTC 时间 2:00 运行一次（可根据需要调整）
+    - cron: '0 2 * * *'
+  workflow_dispatch:   # 允许手动触发
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add upstream remote and fetch tags
+        run: |
+          git remote add upstream https://github.com/sld272/Ximalaya-XM-Decrypt.git
+          git fetch upstream --tags
+
+      - name: Push tags to fork
+        run: git push origin --tags
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sync release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 获取上游仓库的所有 release 标签（排除草稿）
+          UPSTREAM_RELEASES=$(gh release list -R sld272/Ximalaya-XM-Decrypt --limit 100 --json tagName,isDraft -q '.[] | select(.isDraft==false) | .tagName')
+          
+          # 获取 fork 中已有的 release 标签
+          FORK_TAGS=$(gh release list -R ${{ github.repository }} --limit 100 --json tagName -q '.[].tagName')
+
+          for TAG in $UPSTREAM_RELEASES; do
+            # 如果 fork 中还没有这个 release，则创建一个（复制描述）
+            if ! echo "$FORK_TAGS" | grep -qx "$TAG"; then
+              echo "Creating release $TAG in fork..."
+              BODY=$(gh release view "$TAG" -R sld272/Ximalaya-XM-Decrypt --json body -q .body)
+              gh release create "$TAG" \
+                --repo ${{ github.repository }} \
+                --title "$TAG" \
+                --notes "$BODY" \
+                --verify-tag
+            fi
+
+            # 下载并上传附件
+            ASSETS=$(gh release view "$TAG" -R sld272/Ximalaya-XM-Decrypt --json assets -q '.assets[].name')
+            for ASSET in $ASSETS; do
+              echo "Syncing asset: $ASSET"
+              gh release download "$TAG" -R sld272/Ximalaya-XM-Decrypt -p "$ASSET" --clobber
+              gh release upload "$TAG" "$ASSET" --repo ${{ github.repository }} --clobber
+              rm -f "$ASSET"
+            done
+          done
