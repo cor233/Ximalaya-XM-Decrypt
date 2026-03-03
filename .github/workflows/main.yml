@@ -1,7 +1,7 @@
 name: Resync All Releases from Upstream (Oldest First)
 
 on:
-  workflow_dispatch:   # 仅允许手动触发，避免意外运行
+  workflow_dispatch:   # 仅允许手动触发
     inputs:
       delete_existing_releases:
         description: '删除 fork 中现有的所有 Releases？(true / false)'
@@ -59,7 +59,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "正在获取本地所有标签..."
-          # 从本地 Git 获取所有标签（包括可能独立存在的）
           LOCAL_TAGS=$(git tag)
           if [ -n "$LOCAL_TAGS" ]; then
             for TAG in $LOCAL_TAGS; do
@@ -73,20 +72,26 @@ jobs:
           # 重新从上游获取所有标签，确保后续步骤有完整的标签列表
           git fetch upstream --tags --force
 
-      # ---------- 同步阶段（从最老的开始）----------
+      # ---------- 推送所有标签到 fork 远程（关键修复）----------
+      - name: Push all tags to fork remote
+        run: |
+          git push origin --tags --force
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ---------- 获取上游 release 列表（从老到新）----------
       - name: Get upstream releases sorted by date (oldest first)
         id: get_releases
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 获取上游所有 release（排除草稿），按发布时间升序排序，输出为 JSON 数组
           RELEASES_JSON=$(gh release list -R sld272/Ximalaya-XM-Decrypt --limit 1000 --json tagName,publishedAt -q 'sort_by(., .publishedAt) | map(.tagName)')
-          # 将 JSON 数组转换为空格分隔的字符串，方便后续循环
           TAGS=$(echo "$RELEASES_JSON" | jq -r 'join(" ")')
           echo "tags=$TAGS" >> $GITHUB_OUTPUT
           echo "找到 $(echo $TAGS | wc -w) 个上游 Release，将按以下顺序同步："
           for tag in $TAGS; do echo "  $tag"; done
 
+      # ---------- 同步每个 release ----------
       - name: Sync each release (oldest first)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -105,17 +110,15 @@ jobs:
                 gh release delete "$TAG" -R ${{ github.repository }} --yes
               else
                 echo "Release $TAG 已存在，跳过创建（如需强制重新创建，请设置 force_recreate=true）。"
-                # 跳过创建步骤，但仍可能更新附件（见下文附件处理）
-                # 这里可以选择是否也跳过附件上传，简单起见我们仍然检查附件
+                # 即使跳过创建，仍然检查附件（可选），此处省略附件检查以简化，可自行添加逻辑
               fi
             fi
 
             # 如果 fork 中不存在该 Release（或刚被删除），则创建
             if ! gh release view "$TAG" -R ${{ github.repository }} &>/dev/null; then
               echo "在 fork 中创建 Release: $TAG"
-              # 获取上游 release 的描述
               BODY=$(gh release view "$TAG" -R sld272/Ximalaya-XM-Decrypt --json body -q .body)
-              # 创建 release（要求标签已存在）
+              # 现在标签已推送到远程，--verify-tag 可以成功
               gh release create "$TAG" \
                 --repo ${{ github.repository }} \
                 --title "$TAG" \
@@ -124,15 +127,12 @@ jobs:
             fi
 
             # ---------- 同步附件 ----------
-            # 获取上游该 release 的所有附件名称
             ASSETS=$(gh release view "$TAG" -R sld272/Ximalaya-XM-Decrypt --json assets -q '.assets[].name')
             if [ -n "$ASSETS" ]; then
               echo "同步附件："
               for ASSET in $ASSETS; do
                 echo "  处理附件: $ASSET"
-                # 下载附件（--clobber 覆盖本地已有文件）
                 gh release download "$TAG" -R sld272/Ximalaya-XM-Decrypt -p "$ASSET" --clobber
-                # 上传到 fork（--clobber 覆盖远程同名附件）
                 gh release upload "$TAG" "$ASSET" --repo ${{ github.repository }} --clobber
                 rm -f "$ASSET"
               done
